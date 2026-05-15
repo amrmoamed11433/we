@@ -38,6 +38,27 @@ jobs:
           xcodebuild -version
           flutter doctor -v
 
+      - name: Fix intl dependency
+        shell: bash
+        run: |
+          echo "Fixing intl dependency for current Flutter SDK..."
+
+          if grep -qE "^[[:space:]]*intl:" pubspec.yaml; then
+            perl -0pi -e 's/([[:space:]]*)intl:\s*\^?[0-9]+\.[0-9]+\.[0-9]+/${1}intl: ^0.20.2/g' pubspec.yaml
+          else
+            awk '
+              /^dependencies:/ {
+                print
+                print "  intl: ^0.20.2"
+                next
+              }
+              { print }
+            ' pubspec.yaml > pubspec.tmp && mv pubspec.tmp pubspec.yaml
+          fi
+
+          echo "Current intl line:"
+          grep -n "intl:" pubspec.yaml || true
+
       - name: Get Flutter dependencies
         shell: bash
         run: |
