@@ -1,0 +1,155 @@
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      org:
+        description: "Reverse-domain org prefix"
+        required: true
+        default: "com.amrmoamed11433"
+      bundle_id:
+        description: "Unique iOS Bundle ID"
+        required: true
+        default: "com.amrmoamed11433.wepackagesmanager"
+      app_name:
+        description: "Visible app name on iPhone"
+        required: true
+        default: "WE Packages Manager"
+
+jobs:
+  build_unsigned_ipa:
+    name: Build unsigned IPA on macOS
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Install Flutter stable
+        shell: bash
+        run: |
+          git clone https://github.com/flutter/flutter.git --depth 1 -b stable "$HOME/flutter"
+          echo "$HOME/flutter/bin" >> "$GITHUB_PATH"
+
+      - name: Show Flutter and Xcode versions
+        shell: bash
+        run: |
+          flutter --version
+          xcodebuild -version
+          flutter doctor -v
+
+      - name: Get Flutter dependencies
+        shell: bash
+        run: |
+          flutter pub get
+
+      - name: Generate or repair iOS project
+        shell: bash
+        run: |
+          if [ ! -d "ios" ] || [ ! -f "ios/Runner.xcodeproj/project.pbxproj" ] || [ ! -f "ios/Runner/Info.plist" ]; then
+            echo "iOS project is missing or incomplete. Regenerating iOS files..."
+            flutter create --platforms=ios --org "${{ github.event.inputs.org }}" .
+          else
+            echo "iOS project exists."
+          fi
+
+      - name: Configure iOS bundle id and app name
+        shell: bash
+        run: |
+          if [ -f "ios/Runner/Info.plist" ]; then
+            /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ${{ github.event.inputs.app_name }}" ios/Runner/Info.plist || \
+            /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string ${{ github.event.inputs.app_name }}" ios/Runner/Info.plist
+          fi
+
+          if [ -f "ios/Runner.xcodeproj/project.pbxproj" ]; then
+            perl -0777 -i -pe "s/PRODUCT_BUNDLE_IDENTIFIER = [^;]+;/PRODUCT_BUNDLE_IDENTIFIER = ${{ github.event.inputs.bundle_id }};/g" ios/Runner.xcodeproj/project.pbxproj
+          else
+            echo "project.pbxproj not found"
+            exit 1
+          fi
+
+      - name: Fix Flutter localization imports if needed
+        shell: bash
+        run: |
+          flutter pub get
+
+          if grep -q "flutter_gen/gen_l10n" -R lib 2>/dev/null; then
+            echo "Project uses flutter_gen localization imports."
+
+            flutter gen-l10n || true
+
+            GEN_FILE=$(find . -path "*/gen_l10n/app_localizations.dart" | head -n 1)
+
+            if [ -n "$GEN_FILE" ]; then
+              echo "Found localization file at: $GEN_FILE"
+
+              mkdir -p lib/gen_l10n
+              GEN_DIR=$(dirname "$GEN_FILE")
+              cp "$GEN_DIR"/*.dart lib/gen_l10n/
+
+              PACKAGE_NAME=$(grep "^name:" pubspec.yaml | head -n 1 | awk '{print $2}')
+
+              find lib -name "*.dart" -type f -exec perl -0pi -e "s#package:flutter_gen/gen_l10n/#package:${PACKAGE_NAME}/gen_l10n/#g" {} \;
+
+              echo "Localization imports fixed."
+            else
+              echo "No generated app_localizations.dart found. Continuing..."
+            fi
+          else
+            echo "No flutter_gen localization imports found."
+          fi
+
+      - name: Build unsigned iOS app
+        shell: bash
+        run: |
+          flutter pub get
+
+          flutter build ios --release --no-codesign --config-only
+
+          cd ios
+
+          if [ -f "Podfile" ]; then
+            pod install
+          else
+            echo "Podfile not found"
+            exit 1
+          fi
+
+          cd ..
+
+          xcodebuild \
+            -workspace ios/Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build/ios_xcode \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Create unsigned IPA
+        shell: bash
+        run: |
+          rm -rf Payload
+          mkdir -p Payload
+
+          APP_PATH=$(find build/ios_xcode -name "Runner.app" -type d | head -n 1)
+
+          if [ -z "$APP_PATH" ]; then
+            echo "Runner.app not found"
+            find build -name "*.app" -type d || true
+            exit 1
+          fi
+
+          echo "Found app at: $APP_PATH"
+
+          cp -R "$APP_PATH" Payload/
+          zip -r WE_Packages_Manager_unsigned.ipa Payload
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WE_Packages_Manager_unsigned_ipa
+          path: WE_Packages_Manager_unsigned.ipa
+          if-no-files-found: error
